@@ -77,22 +77,13 @@ class FeedforwardNeuralNetModel(nn.Module):
         out = self.fc2(out)
         return out
 
-class Normalize(nn.Module):
-    def __init__(self, *args, **kwargs) -> None:
-        super().__init__(*args, **kwargs)
-
-    def forward(self, x):
-
-        # TODO add normalize logic here
-        
-        return x
-
 class Encoder(nn.Module):
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
         self.multi_head = MultiHeadAttention()
-        self.norm = Normalize()
+        self.norm = nn.LayerNorm((max_input_length, d_model), elementwise_affine=True)
         self.ffn = FeedforwardNeuralNetModel(d_model, d_ff, d_model)
+        self.norm2 = nn.LayerNorm((max_input_length, d_model), elementwise_affine=True)
 
     def forward(self, x):
         input = x
@@ -102,7 +93,7 @@ class Encoder(nn.Module):
         ffn_input = x
         x = self.ffn(x)
         x = x + ffn_input
-        x = self.norm(x)
+        x = self.norm2(x)
         print(x.size())
         return x
 
