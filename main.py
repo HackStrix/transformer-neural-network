@@ -36,9 +36,9 @@ print(encoder_input.size())
 
 
 class MultiHeadAttention(nn.Module):
-    def __init__(self, *args, **kwargs) -> None:
+    def __init__(self, mask, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
-        self.heads = [SelfAttention() for _ in range(8)]
+        self.heads = [SelfAttention(mask=mask) for _ in range(num_heads)]
         self.fc_o = nn.Linear(num_heads * d_v, d_model)
 
     def forward(self, x):
@@ -47,40 +47,51 @@ class MultiHeadAttention(nn.Module):
         return multihead
 
 class SelfAttention(nn.Module):
-    def __init__(self, *args, **kwargs) -> None:
+    def __init__(self, mask, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
         self.fc_q = nn.Linear(d_model, d_k)
         self.fc_k = nn.Linear(d_model, d_k)
         self.fc_v = nn.Linear(d_model, d_v)
+        self.softmax = nn.Softmax(dim=1) ## TODO look into this dimentions again.
+        self.mask = mask
 
+    def scaledDotProduct(self, q, k, v, mask:bool= False):
+        mul = torch.matmul(q,k.T)
+        scale = torch.div(mul, math.sqrt(d_model))
+        if mask:
+            pass
+        else:
+            mask = scale
+        softmax = self.softmax(mask)
+        matmul = torch.matmul(softmax, v)
+        return matmul
 
     def forward(self, x):
         q = self.fc_q(x)
         k = self.fc_k(x)
         v = self.fc_v(x)
 
-        # TODO add softmax and mask capabilities here
-        # TODO do this better
-        return torch.matmul(torch.div(torch.matmul(q,k.T), math.sqrt(d_model)), v)
+        return self.scaledDotProduct(q, k, v, self.mask)
     
 
 class FeedforwardNeuralNetModel(nn.Module):
     def __init__(self, input_dim, hidden_dim, output_dim):
         super(FeedforwardNeuralNetModel, self).__init__()
         self.fc1 = nn.Linear(input_dim, hidden_dim) 
-        self.sigmoid = nn.Sigmoid() # can replace this with relu here, test it out.
+        self.non_linear = nn.Sigmoid() # can replace this with relu here, test it out.
+        # self.non_linear = nn.ReLU()
         self.fc2 = nn.Linear(hidden_dim, output_dim)  
 
     def forward(self, x):
         out = self.fc1(x)
-        out = self.sigmoid(out)
+        out = self.non_linear(out)
         out = self.fc2(out)
         return out
 
 class Encoder(nn.Module):
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
-        self.multi_head = MultiHeadAttention()
+        self.multi_head = MultiHeadAttention(mask=False)
         self.norm = nn.LayerNorm((max_input_length, d_model), elementwise_affine=True)
         self.ffn = FeedforwardNeuralNetModel(d_model, d_ff, d_model)
         self.norm2 = nn.LayerNorm((max_input_length, d_model), elementwise_affine=True)
@@ -100,5 +111,18 @@ class Encoder(nn.Module):
 
 attention = Encoder()
 x = attention.forward(encoder_input)
+
+def create_look_ahead_mask(size: tuple):
+    mask = 1 - torch.triu(torch.ones(size), diagonal=1)
+    return mask
+
+def create_padding_mask(seq):
+    mask = (seq == 0)
+    mask = mask
+    # .unsqueeze(1).unsqueeze(2)
+    return mask
+
+print(create_look_ahead_mask((256,512)))
+print(create_padding_mask(x))
 print(x)
 print(x.size())
