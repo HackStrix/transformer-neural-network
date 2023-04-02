@@ -45,6 +45,17 @@ class MultiHeadAttention(nn.Module):
         attention_heads = [attention(x) for attention in self.heads]
         multihead = self.fc_o(torch.concat(attention_heads, dim=1))
         return multihead
+    
+class CrossMultiHeadAttention(nn.Module):
+    def __init__(self, mask, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self.heads = [SelfAttention(mask=mask) for _ in range(num_heads)]
+        self.fc_o = nn.Linear(num_heads * d_v, d_model)
+
+    def forward(self, x, y):
+        attention_heads = [attention(x, y) for attention in self.heads]
+        multihead = self.fc_o(torch.concat(attention_heads, dim=1))
+        return multihead
 
 class SelfAttention(nn.Module):
     def __init__(self, mask, *args, **kwargs) -> None:
@@ -59,17 +70,21 @@ class SelfAttention(nn.Module):
         mul = torch.matmul(q,k.T)
         scale = torch.div(mul, math.sqrt(d_model))
         if mask:
-            pass
+            masked = scale + create_look_ahead_mask(scale.size())
         else:
-            mask = scale
-        softmax = self.softmax(mask)
+            masked = scale
+        softmax = self.softmax(masked)
         matmul = torch.matmul(softmax, v)
         return matmul
 
-    def forward(self, x):
+    def forward(self, x, y=None):
         q = self.fc_q(x)
-        k = self.fc_k(x)
-        v = self.fc_v(x)
+        if y is None:
+            k = self.fc_k(x)
+            v = self.fc_v(x)
+        else:
+            k = self.fc_k(y)
+            v = self.fc_v(y)
 
         return self.scaledDotProduct(q, k, v, self.mask)
     
@@ -109,11 +124,40 @@ class Encoder(nn.Module):
         return x
 
 
-attention = Encoder()
-x = attention.forward(encoder_input)
+
+
+class Decoder(nn.Module):
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self.masked_multi_head = MultiHeadAttention(mask=True)
+        self.norm = nn.LayerNorm((max_input_length, d_model), elementwise_affine=True)
+        self.cross_head = CrossMultiHeadAttention(mask=False)
+        self.norm2 = nn.LayerNorm((max_input_length, d_model), elementwise_affine=True)
+        self.ffn = FeedforwardNeuralNetModel(d_model, d_ff, d_model)
+        self.norm3 = nn.LayerNorm((max_input_length, d_model), elementwise_affine=True)
+    
+
+    def forward(self, output_embeddings, encoder_output):
+        x = self.masked_multi_head(output_embeddings)
+        x = x + output_embeddings
+        x = self.norm(x)
+        masked_attention = x
+        x = self.cross_head(x, encoder_output)
+        x = x + masked_attention
+        x = self.norm2(x)
+        cross_attention = x
+        x = self.ffn(x)
+        x = x + cross_attention
+        x = self.norm3(x)
+        print(x.size())
+        return x
+
+
 
 def create_look_ahead_mask(size: tuple):
     mask = 1 - torch.triu(torch.ones(size), diagonal=1)
+    mask[mask == 0] = float('-inf')
+    mask[mask == 1] = 0
     return mask
 
 def create_padding_mask(seq):
@@ -122,7 +166,14 @@ def create_padding_mask(seq):
     # .unsqueeze(1).unsqueeze(2)
     return mask
 
-print(create_look_ahead_mask((256,512)))
-print(create_padding_mask(x))
-print(x)
-print(x.size())
+encoder = Encoder()
+decoder = Decoder()
+encoder_out = encoder.forward(encoder_input)
+decoder_out = decoder.forward(encoder_input, encoder_out)
+print(decoder_out)
+
+
+# print(create_look_ahead_mask((256,256)))
+# print(create_padding_mask(x))
+# print(x)
+# print(x.size())
