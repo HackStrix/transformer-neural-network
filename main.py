@@ -11,24 +11,36 @@ num_heads = 8
 d_k = 128
 d_v = int(d_model/num_heads)
 d_ff = 2048
+output_vocab_size = 10000
 
 input_embeddings = torch.rand(max_input_length, d_model)
+input_embeddings = input_embeddings.repeat(batch_size, 1, 1)
+input_embeddings = torch.rand(batch_size, max_input_length, d_model)
+
 print(input_embeddings.size())
 
 def generate_positional_embeddings() -> torch.Tensor:
-    positional_embeddings = torch.zeros(max_input_length, d_model)
-    for pos, array in enumerate(positional_embeddings):
+    positional_embeddings = torch.zeros(batch_size, max_input_length, d_model)
+    for pos, array in enumerate(positional_embeddings[0, :, :]):
         for i, _ in enumerate(array):
+            # print(pos, array, i, l)
             if i%2 == 0:
-                positional_embeddings[pos, i] = math.sin(pos/(10000**((i)/d_model)))
+                positional_embeddings[0, pos, i] = math.sin(pos/(10000**((i)/d_model)))
             else:
-                positional_embeddings[pos, i] = math.sin(pos/(10000**((i-1)/d_model)))
-    
+                positional_embeddings[0, pos, i] = math.sin(pos/(10000**((i-1)/d_model)))
+
     # print(positional_embeddings[1, :])
     return positional_embeddings
-                
-positional_embeddings = generate_positional_embeddings()
 
+def generate_batch_positional_embeddings() -> torch.Tensor:
+    positional_embeddings = generate_positional_embeddings()
+    for batch in range(batch_size):
+        positional_embeddings[batch, :, :] = positional_embeddings[0, :,:]
+    return positional_embeddings
+                
+positional_embeddings = generate_batch_positional_embeddings()
+print(positional_embeddings.size())
+# exit()
 encoder_input = input_embeddings + positional_embeddings
 
 print(encoder_input.size())
@@ -43,7 +55,7 @@ class MultiHeadAttention(nn.Module):
 
     def forward(self, x):
         attention_heads = [attention(x) for attention in self.heads]
-        multihead = self.fc_o(torch.concat(attention_heads, dim=1))
+        multihead = self.fc_o(torch.concat(attention_heads, dim=-1))
         return multihead
     
 class CrossMultiHeadAttention(nn.Module):
@@ -54,7 +66,7 @@ class CrossMultiHeadAttention(nn.Module):
 
     def forward(self, x, y):
         attention_heads = [attention(x, y) for attention in self.heads]
-        multihead = self.fc_o(torch.concat(attention_heads, dim=1))
+        multihead = self.fc_o(torch.concat(attention_heads, dim=-1))
         return multihead
 
 class SelfAttention(nn.Module):
@@ -63,11 +75,12 @@ class SelfAttention(nn.Module):
         self.fc_q = nn.Linear(d_model, d_k)
         self.fc_k = nn.Linear(d_model, d_k)
         self.fc_v = nn.Linear(d_model, d_v)
-        self.softmax = nn.Softmax(dim=1) ## TODO look into this dimentions again.
+        self.softmax = nn.Softmax(dim=-1) ## TODO look into this dimentions again.
         self.mask = mask
 
     def scaledDotProduct(self, q, k, v, mask:bool= False):
-        mul = torch.matmul(q,k.T)
+        k_transpose = torch.transpose(k, 1, 2)
+        mul = torch.matmul(q,k_transpose)
         scale = torch.div(mul, math.sqrt(d_model))
         if mask:
             masked = scale + create_look_ahead_mask(scale.size())
@@ -107,9 +120,9 @@ class Encoder(nn.Module):
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
         self.multi_head = MultiHeadAttention(mask=False)
-        self.norm = nn.LayerNorm((max_input_length, d_model), elementwise_affine=True)
+        self.norm = nn.LayerNorm((d_model, ), elementwise_affine=True)
         self.ffn = FeedforwardNeuralNetModel(d_model, d_ff, d_model)
-        self.norm2 = nn.LayerNorm((max_input_length, d_model), elementwise_affine=True)
+        self.norm2 = nn.LayerNorm((d_model, ), elementwise_affine=True)
 
     def forward(self, x):
         input = x
@@ -130,11 +143,11 @@ class Decoder(nn.Module):
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
         self.masked_multi_head = MultiHeadAttention(mask=True)
-        self.norm = nn.LayerNorm((max_input_length, d_model), elementwise_affine=True)
+        self.norm = nn.LayerNorm((d_model, ), elementwise_affine=True)
         self.cross_head = CrossMultiHeadAttention(mask=False)
-        self.norm2 = nn.LayerNorm((max_input_length, d_model), elementwise_affine=True)
+        self.norm2 = nn.LayerNorm((d_model, ), elementwise_affine=True)
         self.ffn = FeedforwardNeuralNetModel(d_model, d_ff, d_model)
-        self.norm3 = nn.LayerNorm((max_input_length, d_model), elementwise_affine=True)
+        self.norm3 = nn.LayerNorm((d_model, ), elementwise_affine=True)
     
 
     def forward(self, output_embeddings, encoder_output):
@@ -160,17 +173,48 @@ def create_look_ahead_mask(size: tuple):
     mask[mask == 1] = 0
     return mask
 
-def create_padding_mask(seq):
-    mask = (seq == 0)
-    mask = mask
-    # .unsqueeze(1).unsqueeze(2)
-    return mask
+# TODO to create a padding mask and understand where in the architecuture it should be implemented 
 
-encoder = Encoder()
-decoder = Decoder()
-encoder_out = encoder.forward(encoder_input)
-decoder_out = decoder.forward(encoder_input, encoder_out)
-print(decoder_out)
+# def create_padding_mask(seq):
+#     mask = (seq == 0)
+#     mask = mask
+#     # .unsqueeze(1).unsqueeze(2)
+#     return mask
+
+
+class Transformer(nn.Module):
+    def __init__(self, Nx, output_vocab_size  *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self.encoders = [Encoder() for _ in range(Nx)]
+        self.decoders = [Decoder() for _ in range(Nx)]
+        self.fc_o = nn.Linear(d_model, output_vocab_size)
+
+    def forward(self, x, y):
+        encoder_out = x
+        for encoder in self.encoders:
+            encoder_out = encoder(encoder_out)
+        
+        decoder_out = y
+        for decoder in self.decoders:
+            decoder_out = decoder(decoder_out, encoder_out)
+
+        # TODO map this to the vocab size using linear layer and softmax
+        output = self.fc_o(decoder_out)
+        probability = torch.softmax(output, dim=-1)
+        return probability
+
+
+
+# encoder = Encoder()
+# decoder = Decoder()
+# encoder_out = encoder.forward(encoder_input)
+# print(encoder_out[0,:,:])
+# print(encoder_out[1,:,:])
+# decoder_out = decoder.forward(encoder_input, encoder_out)
+
+trans = Transformer(6)
+print(trans(encoder_input, encoder_input))
+# print(decoder_out)
 
 
 # print(create_look_ahead_mask((256,256)))
